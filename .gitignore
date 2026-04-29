@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+*.egg-info/
+dist/
+build/
+
+# ========================
+# Django stuff
+# ========================
+db.sqlite3
+*.log
+media/
+staticfiles/
+
+# migrations (optional: only if you want clean repo)
+# */migrations/*.py
+# */migrations/*.pyc
+
+# ========================
+# IDE / Editors
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ========================
+# OS files
+# ========================
+.DS_Store
+Thumbs.db
+
+# ========================
+# Testing / coverage
+# ========================
+.coverage
+htmlcov/
+
+# ========================
+# Docker (optional cache)
+# ========================
+*.pid
+__pycache__/
+.pytest_cache/
+
+# ========================
+# Environment Variables
+# ========================
+.env
+venv/
+
+# ========================
+# Markdown
+# ========================
+*.md
+!README.md
+
