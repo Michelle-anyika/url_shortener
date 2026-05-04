@@ -21,7 +21,7 @@ from api.views import redirect_view
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/', include('api.urls')),
+    path('api/v1/', include('api.urls')),
     
     # Swagger docs
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
