@@ -13,12 +13,12 @@ def user():
 @pytest.mark.django_db
 class TestShortenerModels:
     def test_create_tag(self):
-        tag = Tag.objects.create(name='Marketing')
-        assert tag.name == 'Marketing'
-        assert str(tag) == 'Marketing'
+        tag, _ = Tag.objects.get_or_create(name='TestMarketing')
+        assert tag.name == 'TestMarketing'
+        assert str(tag) == 'TestMarketing'
 
     def test_tag_name_unique(self):
-        Tag.objects.create(name='UniqueTag')
+        Tag.objects.get_or_create(name='UniqueTag')
         with pytest.raises(IntegrityError):
             Tag.objects.create(name='UniqueTag')
 
@@ -55,8 +55,8 @@ class TestShortenerModels:
 
     def test_url_tags_relationship(self):
         url = URL.objects.create(original_url='https://example.com', short_code='code3')
-        tag1 = Tag.objects.create(name='Social')
-        tag2 = Tag.objects.create(name='News')
+        tag1, _ = Tag.objects.get_or_create(name='TestSocial')
+        tag2, _ = Tag.objects.get_or_create(name='TestNews')
         url.tags.add(tag1, tag2)
         assert url.tags.count() == 2
         assert tag1 in url.tags.all()
