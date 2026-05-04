@@ -8,6 +8,11 @@ class Tag(models.Model):
     def __str__(self):
         return self.name
 
+    class Meta:
+        verbose_name = "Tag"
+        verbose_name_plural = "Tags"
+        ordering = ['name']
+
 class URLManager(models.Manager):
     def get_queryset(self):
         # Default queryset does not have select_related to keep it light,
@@ -40,7 +45,7 @@ class URLManager(models.Manager):
 
 class URL(models.Model):
     original_url = models.URLField()
-    short_code = models.CharField(max_length=10, unique=True, db_index=True)
+    short_code = models.CharField(max_length=50, unique=True, db_index=True)
     custom_alias = models.CharField(max_length=50, null=True, blank=True, unique=True)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True)
     is_active = models.BooleanField(default=True)
@@ -56,6 +61,15 @@ class URL(models.Model):
 
     def __str__(self):
         return f"{self.short_code} -> {self.original_url}"
+
+    class Meta:
+        verbose_name = "URL"
+        verbose_name_plural = "URLs"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['short_code']),
+            models.Index(fields=['created_at']),
+        ]
 
 class ClickManager(models.Manager):
     def clicks_per_country(self, url_id):
@@ -77,3 +91,8 @@ class Click(models.Model):
 
     def __str__(self):
         return f"Click on {self.url.short_code} at {self.clicked_at}"
+
+    class Meta:
+        verbose_name = "Click Analytics"
+        verbose_name_plural = "Click Analytics"
+        ordering = ['-clicked_at']
