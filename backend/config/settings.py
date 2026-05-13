@@ -86,23 +86,14 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('DB_NAME', default='url_shortener'),
+        'USER': config('DB_USER', default='postgres'),
+        'PASSWORD': config('DB_PASSWORD', default='postgres'),
+        'HOST': config('DB_HOST', default='db'),
+        'PORT': config('DB_PORT', default='5432'),
     }
 }
-
-db_url = config('DATABASE_URL', default='')
-if db_url:
-    from urllib.parse import urlparse
-    url = urlparse(db_url)
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': url.path[1:],
-        'USER': url.username,
-        'PASSWORD': url.password,
-        'HOST': url.hostname,
-        'PORT': url.port,
-    }
 
 
 # Password validation
@@ -207,6 +198,15 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+# --- Module 8: Celery Beat Schedule ---
+from celery.schedules import crontab
+CELERY_BEAT_SCHEDULE = {
+    'clean-expired-urls-daily': {
+        'task': 'shortener.tasks.clean_expired_urls_task',
+        'schedule': crontab(hour=2, minute=0),  # Run daily at 2 AM
+    },
+}
 
 # --- Module 8: JSON Logging Setup ---
 LOGGING = {
