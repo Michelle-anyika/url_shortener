@@ -10,7 +10,7 @@ import logging
 
 from api.serializers import URLSerializer, UserRegistrationSerializer, URLAnalyticsSerializer
 from shortener.models import URL
-from shortener.tasks import track_click_task
+from shortener.tasks import track_click_task, fetch_url_preview_task
 from api.permissions import IsOwnerOrReadOnly, IsPremiumUser
 from rest_framework_simplejwt.views import TokenObtainPairView
 
@@ -27,7 +27,9 @@ class URLCreateView(APIView):
         serializer = URLSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             # Automatically assign the owner to the current user
-            serializer.save(owner=request.user)
+            instance = serializer.save(owner=request.user)
+            # Trigger metadata fetch asynchronously
+            fetch_url_preview_task.delay(instance.id)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

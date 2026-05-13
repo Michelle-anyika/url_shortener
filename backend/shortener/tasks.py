@@ -1,5 +1,6 @@
 from celery import shared_task
 from .models import URL, Click
+from .services import PreviewService
 import logging
 from django.utils import timezone
 
@@ -33,3 +34,23 @@ def clean_expired_urls_task():
         'cleaned_count': count
     })
     return count
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def fetch_url_preview_task(self, url_id):
+    try:
+        url_obj = URL.objects.get(id=url_id)
+        metadata = PreviewService.fetch_metadata(url_obj.original_url)
+        
+        if metadata:
+            url_obj.title = metadata.get('title')
+            url_obj.description = metadata.get('description')
+            url_obj.favicon = metadata.get('favicon')
+            url_obj.save()
+            logger.info(f"Successfully updated metadata for URL ID {url_id}")
+            
+    except URL.DoesNotExist:
+        logger.warning(f"URL ID {url_id} not found for preview fetch")
+    except Exception as exc:
+        logger.error(f"Error fetching preview for URL ID {url_id}: {str(exc)}")
+        # We already have retries in PreviewService, but we can also retry the task if it's a transient error
+        raise self.retry(exc=exc)
