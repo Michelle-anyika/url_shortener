@@ -1,4 +1,5 @@
 from rest_framework import permissions
+from core.models import tier_premium
 
 class IsOwnerOrReadOnly(permissions.BasePermission):
     """
@@ -19,4 +20,4 @@ class IsPremiumUser(permissions.BasePermission):
     Allows access only to premium users.
     """
     def has_permission(self, request, view):
-        return bool(request.user and request.user.is_authenticated and request.user.tier == 'Premium')
+        return bool(request.user and request.user.is_authenticated and request.user.tier == tier_premium)
