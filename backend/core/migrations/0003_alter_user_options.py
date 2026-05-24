@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0002_user_is_premium_user_tier_alter_user_email'),
+        ('core', '0001_initial'),
     ]
 
     operations = [

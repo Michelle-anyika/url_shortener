@@ -1,6 +1,5 @@
 from rest_framework import serializers
 from shortener.models import URL
-from shortener.utils import generate_short_code
 
 class URLSerializer(serializers.ModelSerializer):
     class Meta:
@@ -8,12 +7,11 @@ class URLSerializer(serializers.ModelSerializer):
         fields = ['original_url', 'short_code']
         read_only_fields = ['short_code']
 
-    def create(self, validated_data):
-        # Generate a unique short code
-        while True:
-            code = generate_short_code()
-            if not URL.objects.filter(short_code=code).exists():
-                break
-        
-        validated_data['short_code'] = code
-        return super().create(validated_data)
+    def validate_original_url(self, value):
+        """
+        Validate that the URL starts with a valid scheme (http:// or https://)
+        to prevent generic/malformed strings or malicious JavaScript schemes.
+        """
+        if not value.startswith(('http://', 'https://')):
+            raise serializers.ValidationError("URL must start with http:// or https://")
+        return value

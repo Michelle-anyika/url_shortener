@@ -4,9 +4,9 @@ services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-url_shortener_db}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -14,15 +14,19 @@ services:
 
   web:
     build: ./backend
-    command: python manage.py runserver 0.0.0.0:8000
+    # Ensure database is up and reachable, apply migrations, and then start the server
+    command: >
+      sh -c "python wait_for_db.py && 
+             python manage.py migrate && 
+             python manage.py runserver 0.0.0.0:8000"
     volumes:
       - ./backend:/app
     ports:
       - "8000:8000"
     environment:
       - DEBUG=True
-      - SECRET_KEY=${SECRET_KEY}
-      - DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-dev-key-fallback}
+      - DATABASE_URL=postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres_password}@db:5432/${DB_NAME:-url_shortener_db}
     depends_on:
       - db
 
