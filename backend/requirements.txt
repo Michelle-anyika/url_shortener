@@ -1,7 +1,26 @@
-Django>=5.0,<5.1
-djangorestframework>=3.15.0
-psycopg2-binary>=2.9.9
-python-decouple>=3.8
-drf-spectacular>=0.27.2
-pytest>=8.1.1
-pytest-django>=4.8.0
+# Core
+Django==5.0.14
+djangorestframework==3.17.1
+
+# JWT Authentication
+djangorestframework-simplejwt==5.5.1
+PyJWT==2.12.1
+
+# API Documentation
+drf-spectacular==0.29.0
+
+# Environment config
+python-decouple==3.8
+
+# Database
+psycopg2-binary==2.9.12
+
+# Password hashing (Argon2 — stronger than default PBKDF2)
+argon2-cffi==23.1.0
+
+# HTTP client (for Google token verification in social auth)
+requests==2.32.3
+
+# Utilities
+sqlparse==0.5.5
+tzdata==2026.1

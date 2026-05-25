@@ -1,11 +1,30 @@
 from django.urls import path
-from api.views import URLCreateView
-from shortener.factories import URLServiceFactory
+from rest_framework_simplejwt.views import TokenRefreshView
 
-# Instantiate concrete service instance using the factory
-url_service = URLServiceFactory.create_service()
+from api.views import (
+    UserRegisterView,
+    ThrottledTokenObtainPairView,
+    LogoutView,
+    SocialAuthView,
+    URLCreateView,
+    URLListView,
+    URLDetailView,
+    URLAnalyticsView,
+)
 
 urlpatterns = [
-    # Inject service dependency into the class-based view via properties
-    path('urls/', URLCreateView.as_view(service=url_service), name='url-create'),
+    # --- Authentication ---
+    path('auth/register/', UserRegisterView.as_view(), name='register'),
+    path('auth/login/',    ThrottledTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/refresh/',  TokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/logout/',   LogoutView.as_view(), name='logout'),
+    path('auth/social/',   SocialAuthView.as_view(), name='social_auth'),
+
+    # --- URL management ---
+    path('urls/',               URLCreateView.as_view(), name='url-create'),
+    path('urls/list/',          URLListView.as_view(),   name='url-list'),
+    path('urls/<str:short_code>/', URLDetailView.as_view(), name='url-detail'),
+
+    # --- Analytics (Premium only) ---
+    path('analytics/<str:short_code>/', URLAnalyticsView.as_view(), name='url-analytics'),
 ]
