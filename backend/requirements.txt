@@ -15,11 +15,22 @@ python-decouple==3.8
 # Database
 psycopg2-binary==2.9.12
 
-# Password hashing (Argon2 — stronger than default PBKDF2)
+# Password hashing (Argon2)
 argon2-cffi==23.1.0
 
-# HTTP client (for Google token verification in social auth)
+# Async task queue
+celery==5.3.6
+redis==5.0.1
+django-redis==5.4.0
+
+# Structured JSON logging
+python-json-logger==2.0.7
+
+# HTTP client (Google social auth token verification)
 requests==2.32.3
+
+# Production server
+gunicorn==22.0.0
 
 # Utilities
 sqlparse==0.5.5
