@@ -1,18 +1,10 @@
 """
-Celery tasks for the shortener app.
+Celery tasks — Module 8 + 9.
 
-Write-Behind Pattern
---------------------
-Instead of writing Click records synchronously inside the HTTP request
-(which adds DB latency to every redirect), the redirect view fires
-track_click_task.delay(...) and returns the redirect immediately.
-The task runs in a background worker and persists the analytics data
-without the user ever waiting for it.
-
-Periodic Tasks (Beat)
----------------------
-clean_expired_urls_task  — runs nightly at midnight (configured in celery.py)
-warm_popular_url_cache_task — runs every 6 hours to pre-warm popular URLs
+track_click_task         — write-behind analytics (Module 8)
+clean_expired_urls_task  — nightly cleanup (Module 8)
+warm_popular_url_cache_task — cache warming (Module 8)
+fetch_url_preview_task   — async preview metadata fetch (Module 9)
 """
 
 import logging
@@ -22,124 +14,111 @@ from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL = 60 * 15  # 15 minutes
+CACHE_TTL = 60 * 15
 
 
 # ---------------------------------------------------------------------------
-# Write-Behind: Click tracking
+# Module 8: Write-Behind click tracking
+# ---------------------------------------------------------------------------
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=5,
+             name='shortener.tasks.track_click_task')
+def track_click_task(self, url_id, ip_address, user_agent, referrer=None,
+                     city=None, country=None):
+    from shortener.models import Click, URL
+    try:
+        url = URL.objects.get(pk=url_id)
+        Click.objects.create(
+            url=url, ip_address=ip_address or None,
+            user_agent=user_agent or '', referrer=referrer or None,
+            city=city or '', country=country or '',
+        )
+        URL.objects.filter(pk=url_id).update(click_count=url.click_count + 1)
+        logger.info('Click tracked', extra={'url_id': url_id})
+    except Exception as exc:
+        logger.error('track_click_task failed', extra={'url_id': url_id, 'error': str(exc)})
+        raise self.retry(exc=exc)
+
+
+# ---------------------------------------------------------------------------
+# Module 8: Nightly cleanup
+# ---------------------------------------------------------------------------
+
+@shared_task(name='shortener.tasks.clean_expired_urls_task')
+def clean_expired_urls_task():
+    from shortener.models import URL
+    now = timezone.now()
+    expired_qs = URL.objects.filter(expires_at__lte=now, is_active=True)
+    short_codes = list(expired_qs.values_list('short_code', flat=True))
+    count = expired_qs.update(is_active=False)
+    for code in short_codes:
+        cache.delete(f'url:{code}')
+    logger.info('clean_expired_urls_task', extra={'deactivated_count': count})
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Module 8: Cache warming
+# ---------------------------------------------------------------------------
+
+@shared_task(name='shortener.tasks.warm_popular_url_cache_task')
+def warm_popular_url_cache_task(top_n=100):
+    from shortener.models import URL
+    popular = URL.objects.active_urls().popular()[:top_n]
+    warmed = sum(
+        1 for url in popular
+        if cache.get(f'url:{url.short_code}') is None
+        and cache.set(f'url:{url.short_code}', url, CACHE_TTL) is None
+    )
+    logger.info('warm_popular_url_cache_task', extra={'warmed': warmed})
+    return warmed
+
+
+# ---------------------------------------------------------------------------
+# Module 9: Async preview fetch (Saga Step 2)
 # ---------------------------------------------------------------------------
 
 @shared_task(
     bind=True,
     max_retries=3,
-    default_retry_delay=5,
-    name='shortener.tasks.track_click_task',
+    default_retry_delay=10,
+    name='shortener.tasks.fetch_url_preview_task',
 )
-def track_click_task(self, url_id, ip_address, user_agent, referrer=None,
-                     city=None, country=None):
+def fetch_url_preview_task(self, url_id: int, original_url: str):
     """
-    Persist a Click record asynchronously.
+    Asynchronously fetches title/description/favicon from the Preview Service
+    and updates the URL record.
 
-    Called by the redirect view via .delay() so the user gets their
-    redirect instantly without waiting for a DB write.
+    This is Step 2 of the URLCreationSaga. It runs in the background so
+    the HTTP response to the user is not blocked by the external HTTP call.
 
-    Retries up to 3 times with a 5-second delay if the DB is unavailable.
+    Retries 3 times with 10-second delays if the preview service is down.
     """
-    from shortener.models import Click, URL
+    from shortener.models import URL
+    from shortener.services import PreviewServiceClient
 
     try:
         url = URL.objects.get(pk=url_id)
-        Click.objects.create(
-            url=url,
-            ip_address=ip_address or None,
-            user_agent=user_agent or '',
-            referrer=referrer or None,
-            city=city or '',
-            country=country or '',
-        )
-        # Atomically increment the denormalised counter
-        URL.objects.filter(pk=url_id).update(
-            click_count=url.click_count + 1
-        )
-        logger.info(
-            'Click tracked successfully',
-            extra={'url_id': url_id, 'ip': ip_address},
-        )
     except URL.DoesNotExist:
-        # URL was deleted between the redirect and the task running — ignore
-        logger.warning('track_click_task: URL %s not found, skipping', url_id)
-    except Exception as exc:
-        logger.error(
-            'track_click_task failed, retrying',
-            extra={'url_id': url_id, 'error': str(exc)},
+        logger.warning('fetch_url_preview_task: URL %d not found', url_id)
+        return
+
+    client = PreviewServiceClient()
+    metadata = client.fetch_metadata(original_url)
+
+    if metadata:
+        url.title = metadata.get('title') or url.title
+        url.description = metadata.get('description') or url.description
+        url.favicon = metadata.get('favicon') or url.favicon
+        url.save(update_fields=['title', 'description', 'favicon'])
+        logger.info(
+            'Preview metadata saved',
+            extra={'url_id': url_id, 'title': url.title},
         )
-        raise self.retry(exc=exc)
-
-
-# ---------------------------------------------------------------------------
-# Periodic: Expire stale URLs
-# ---------------------------------------------------------------------------
-
-@shared_task(
-    name='shortener.tasks.clean_expired_urls_task',
-)
-def clean_expired_urls_task():
-    """
-    Nightly cleanup task (Celery Beat — runs at midnight UTC).
-
-    Finds all URLs whose expires_at has passed and marks them inactive.
-    Also evicts their cache keys so stale data is not served.
-
-    Returns the number of URLs deactivated (logged for monitoring).
-    """
-    from shortener.models import URL
-
-    now = timezone.now()
-    expired_qs = URL.objects.filter(expires_at__lte=now, is_active=True)
-
-    # Collect short codes before the update so we can evict cache
-    short_codes = list(expired_qs.values_list('short_code', flat=True))
-
-    count = expired_qs.update(is_active=False)
-
-    # Evict cache for every deactivated URL
-    for code in short_codes:
-        cache.delete(f'url:{code}')
-
-    logger.info(
-        'clean_expired_urls_task completed',
-        extra={'deactivated_count': count},
-    )
-    return count
-
-
-# ---------------------------------------------------------------------------
-# Periodic: Cache warming
-# ---------------------------------------------------------------------------
-
-@shared_task(
-    name='shortener.tasks.warm_popular_url_cache_task',
-)
-def warm_popular_url_cache_task(top_n=100):
-    """
-    Cache-warming task (Celery Beat — runs every 6 hours).
-
-    Pre-loads the top N most-clicked active URLs into Redis so the first
-    request after a cache miss never hits the database.
-    This is especially useful after a Redis restart.
-    """
-    from shortener.models import URL
-
-    popular = URL.objects.active_urls().popular()[:top_n]
-    warmed = 0
-    for url in popular:
-        cache_key = f'url:{url.short_code}'
-        if cache.get(cache_key) is None:
-            cache.set(cache_key, url, CACHE_TTL)
-            warmed += 1
-
-    logger.info(
-        'warm_popular_url_cache_task completed',
-        extra={'checked': len(popular), 'warmed': warmed},
-    )
-    return warmed
+    else:
+        # Circuit is open or service returned nothing — retry later
+        logger.warning(
+            'fetch_url_preview_task: no metadata returned, will retry',
+            extra={'url_id': url_id},
+        )
+        raise self.retry(exc=Exception('Preview service returned no data'))

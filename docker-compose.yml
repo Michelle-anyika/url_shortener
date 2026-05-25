@@ -2,9 +2,6 @@ version: '3.9'
 
 services:
 
-  # --------------------------------------------------------------------------
-  # PostgreSQL — primary database
-  # --------------------------------------------------------------------------
   db:
     image: postgres:16-alpine
     environment:
@@ -13,24 +10,17 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # --------------------------------------------------------------------------
-  # Redis — cache + Celery broker
-  # --------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -38,13 +28,33 @@ services:
       retries: 5
 
   # --------------------------------------------------------------------------
-  # Django — application server (Gunicorn)
+  # Preview Microservice — stateless, runs on port 8001
+  # Discovered by the main service via Docker Compose DNS: preview_service
+  # --------------------------------------------------------------------------
+  preview_service:
+    build:
+      context: ./preview_service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DEBUG: "False"
+      SCRAPER_TIMEOUT: "10"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # Main Django service
   # --------------------------------------------------------------------------
   web:
-    build: .
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     command: gunicorn -c gunicorn.conf.py config.wsgi:application
-    volumes:
-      - ./backend:/app
     ports:
       - "8000:8000"
     env_file: backend/.env
@@ -53,46 +63,42 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      PREVIEW_SERVICE_URL: http://preview_service:8001
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      preview_service:
+        condition: service_healthy
 
-  # --------------------------------------------------------------------------
-  # Celery Worker — background task processing
-  # --------------------------------------------------------------------------
   celery_worker:
-    build: .
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     command: celery -A config worker -l info --concurrency 4
-    volumes:
-      - ./backend:/app
     env_file: backend/.env
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/urlshortener
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      PREVIEW_SERVICE_URL: http://preview_service:8001
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
 
-  # --------------------------------------------------------------------------
-  # Celery Beat — periodic task scheduler
-  # --------------------------------------------------------------------------
   celery_beat:
-    build: .
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     command: celery -A config beat -l info
-    volumes:
-      - ./backend:/app
     env_file: backend/.env
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/urlshortener
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy

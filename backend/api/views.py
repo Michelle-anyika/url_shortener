@@ -1,19 +1,18 @@
 """
-API views — Module 8: Advanced Optimization & Production Readiness.
+API views — Module 9: Microservices Essentials.
 
-Key changes from Module 7:
-  - redirect_view: Write-Behind pattern — Click is tracked via Celery task,
-    not written synchronously in the request. Response time is now O(cache).
-  - HealthCheckView: probes DB and Redis; returns 200 or 503.
-  - All views use structured JSON logging for 500s and security events.
+Architecture: All views follow the CQRS pattern.
+  - Write operations (POST/PUT/PATCH/DELETE) → Command handlers
+  - Read operations (GET) → Query handlers
+  - URL creation → URLCreationSaga (coordinates local + remote steps)
 """
 
 import logging
 import requests as http_requests
 
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import redirect
 from django.http import Http404
-from django.db import transaction, connection
+from django.db import connection
 from django.core.cache import cache
 from django.utils import timezone
 
@@ -23,26 +22,42 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework.pagination import PageNumberPagination
 
 from api.serializers import (
-    UserRegistrationSerializer,
-    UserProfileSerializer,
-    URLSerializer,
-    URLAnalyticsSerializer,
-    SocialAuthSerializer,
+    UserRegistrationSerializer, UserProfileSerializer,
+    URLSerializer, URLAnalyticsSerializer, SocialAuthSerializer,
 )
 from api.permissions import IsOwnerOrReadOnly, IsOwnerOnly, IsPremiumUser
-from shortener.models import URL, Click
+from shortener.commands import (
+    CreateURLCommand, UpdateURLCommand, DeleteURLCommand,
+    handle_update_url, handle_delete_url, CommandError,
+)
+from shortener.queries import (
+    get_url_by_code, list_user_urls, get_url_analytics,
+    get_clicks_by_country, QueryError,
+)
+from shortener.saga import URLCreationSaga
 from shortener.tasks import track_click_task
+from shortener.circuit_breaker import CircuitBreaker
 from core.models import User
 
 logger = logging.getLogger(__name__)
-
-CACHE_TTL = 60 * 15  # 15 minutes
+CACHE_TTL = 60 * 15
 
 
 # ---------------------------------------------------------------------------
-# Auth views (carried from Module 7 — unchanged)
+# Pagination
+# ---------------------------------------------------------------------------
+
+class URLPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+# ---------------------------------------------------------------------------
+# Auth views
 # ---------------------------------------------------------------------------
 
 class UserRegisterView(generics.CreateAPIView):
@@ -54,18 +69,14 @@ class UserRegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         refresh = RefreshToken.for_user(user)
-        return Response(
-            {
-                'user': UserProfileSerializer(user).data,
-                'access': str(refresh.access_token),
-                'refresh': str(refresh),
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        return Response({
+            'user': UserProfileSerializer(user).data,
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+        }, status=status.HTTP_201_CREATED)
 
 
 class ThrottledTokenObtainPairView(TokenObtainPairView):
-    """Rate-limited login — 5 requests per minute."""
     throttle_scope = 'login'
 
 
@@ -75,13 +86,12 @@ class LogoutView(APIView):
     def post(self, request):
         refresh_token = request.data.get('refresh')
         if not refresh_token:
-            return Response({'error': 'refresh token is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'refresh token is required'}, status=400)
         try:
-            token = RefreshToken(refresh_token)
-            token.blacklist()
+            RefreshToken(refresh_token).blacklist()
             return Response({'detail': 'Successfully logged out.'})
         except TokenError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': str(e)}, status=400)
 
 
 class SocialAuthView(APIView):
@@ -93,145 +103,199 @@ class SocialAuthView(APIView):
         serializer.is_valid(raise_exception=True)
         provider = serializer.validated_data['provider']
         token = serializer.validated_data['token']
-        if provider == 'google':
-            user = self._authenticate_google(token)
-        else:
-            return Response({'error': f"Provider '{provider}' is not supported."}, status=400)
-        if user is None:
-            return Response({'error': 'Could not verify social token.'}, status=status.HTTP_401_UNAUTHORIZED)
+        if provider != 'google':
+            return Response({'error': f"Provider '{provider}' not supported."}, status=400)
+        user = self._authenticate_google(token)
+        if not user:
+            return Response({'error': 'Could not verify social token.'}, status=401)
         refresh = RefreshToken.for_user(user)
         return Response({'user': UserProfileSerializer(user).data,
                          'access': str(refresh.access_token), 'refresh': str(refresh)})
 
     def _authenticate_google(self, id_token):
         try:
-            resp = http_requests.get(self.GOOGLE_TOKENINFO_URL, params={'id_token': id_token}, timeout=5)
+            resp = http_requests.get(self.GOOGLE_TOKENINFO_URL,
+                                     params={'id_token': id_token}, timeout=5)
             if resp.status_code != 200:
                 return None
             payload = resp.json()
             email = payload.get('email')
             if not email or not payload.get('email_verified', False):
                 return None
-            user, _ = User.objects.get_or_create(email=email,
-                                                  defaults={'username': email.split('@')[0], 'is_active': True})
+            user, _ = User.objects.get_or_create(
+                email=email, defaults={'username': email.split('@')[0], 'is_active': True})
             return user
         except Exception:
             return None
 
 
 # ---------------------------------------------------------------------------
-# URL CRUD views
+# URL views — CQRS
 # ---------------------------------------------------------------------------
 
 class URLCreateView(APIView):
+    """
+    POST /api/v1/urls/
+    Executes the URLCreationSaga:
+      Step 1 — CreateURLCommand (local DB write)
+      Step 2 — fetch_url_preview_task.delay() (async external call)
+    """
     permission_classes = [permissions.IsAuthenticated]
 
-    @transaction.atomic
     def post(self, request):
         serializer = URLSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
-        url = serializer.save(owner=request.user)
-        logger.info('URL created', extra={'short_code': url.short_code, 'user': request.user.username})
-        return Response(URLSerializer(url).data, status=status.HTTP_201_CREATED)
+        data = serializer.validated_data
+
+        cmd = CreateURLCommand(
+            original_url=data['original_url'],
+            owner=request.user,
+            custom_alias=data.get('custom_alias') or None,
+            expires_at=data.get('expires_at'),
+            title=data.get('title'),
+            description=data.get('description'),
+            favicon=data.get('favicon'),
+            tag_names=[t.name for t in data.get('tags', [])],
+        )
+
+        try:
+            saga = URLCreationSaga()
+            result = saga.execute(cmd)
+        except CommandError as e:
+            return Response({'error': e.message}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_data = URLSerializer(result.url).data
+        response_data['preview_queued'] = result.preview_fetched
+        logger.info('URL created via saga', extra={
+            'short_code': result.url.short_code,
+            'preview_queued': result.preview_fetched,
+        })
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
-class URLListView(generics.ListAPIView):
-    serializer_class = URLSerializer
+class URLListView(APIView):
+    """
+    GET /api/v1/urls/?tag=<name>&search=<term>&page=<n>
+    Returns the authenticated user's URLs. Supports pagination and filtering.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        return URL.objects.active_urls().filter(owner=self.request.user)
+    def get(self, request):
+        tag = request.query_params.get('tag')
+        search = request.query_params.get('search')
+        qs = list_user_urls(owner=request.user, tag=tag, search=search)
+
+        paginator = URLPagination()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = URLSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
-class URLDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = URL.objects.all()
-    serializer_class = URLSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly, IsOwnerOrReadOnly]
-    lookup_field = 'short_code'
+class URLDetailView(APIView):
+    """
+    GET    /api/v1/urls/<short_code>/ — public read
+    PUT    /api/v1/urls/<short_code>/ — owner only (full update)
+    PATCH  /api/v1/urls/<short_code>/ — owner only (partial update)
+    DELETE /api/v1/urls/<short_code>/ — owner only
+    """
 
-    def perform_update(self, serializer):
-        instance = serializer.save()
-        # Cache invalidation — must evict immediately on any update
-        cache.delete(f'url:{instance.short_code}')
-        logger.info('URL updated, cache invalidated', extra={'short_code': instance.short_code})
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated(), IsOwnerOrReadOnly()]
 
-    def perform_destroy(self, instance):
-        cache.delete(f'url:{instance.short_code}')
-        logger.info('URL deleted, cache invalidated', extra={'short_code': instance.short_code})
-        instance.delete()
+    def get(self, request, short_code):
+        try:
+            url = get_url_by_code(short_code)
+        except QueryError:
+            return Response({'error': 'Not found'}, status=404)
+        return Response(URLSerializer(url).data)
+
+    def patch(self, request, short_code):
+        return self._update(request, short_code)
+
+    def put(self, request, short_code):
+        return self._update(request, short_code)
+
+    def _update(self, request, short_code):
+        cmd = UpdateURLCommand(
+            short_code=short_code,
+            requester=request.user,
+            original_url=request.data.get('original_url'),
+            expires_at=request.data.get('expires_at'),
+            is_active=request.data.get('is_active'),
+            title=request.data.get('title'),
+            description=request.data.get('description'),
+        )
+        try:
+            url = handle_update_url(cmd)
+        except CommandError as e:
+            code = status.HTTP_404_NOT_FOUND if e.code == 'not_found' else status.HTTP_400_BAD_REQUEST
+            return Response({'error': e.message}, status=code)
+        return Response(URLSerializer(url).data)
+
+    def delete(self, request, short_code):
+        cmd = DeleteURLCommand(short_code=short_code, requester=request.user)
+        try:
+            handle_delete_url(cmd)
+        except CommandError as e:
+            return Response({'error': e.message}, status=404)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class URLAnalyticsView(generics.RetrieveAPIView):
-    queryset = URL.objects.all()
-    serializer_class = URLAnalyticsSerializer
-    permission_classes = [permissions.IsAuthenticated, IsPremiumUser, IsOwnerOnly]
-    lookup_field = 'short_code'
+class URLAnalyticsView(APIView):
+    """
+    GET /api/v1/analytics/<short_code>/
+    Premium + owner only. Returns time-series click data and geo breakdown.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsPremiumUser]
+
+    def get(self, request, short_code):
+        try:
+            url = get_url_analytics(short_code=short_code, owner=request.user)
+        except QueryError as e:
+            return Response({'error': e.message}, status=404)
+
+        data = URLAnalyticsSerializer(url).data
+        data['clicks_by_country'] = get_clicks_by_country(url)
+        return Response(data)
 
 
 # ---------------------------------------------------------------------------
-# Public redirect — Write-Behind pattern
+# Public redirect — write-behind (Module 8) + CQRS query
 # ---------------------------------------------------------------------------
 
 def redirect_view(request, short_code):
-    """
-    GET /<short_code>/
-
-    Performance path:
-      1. Check Redis cache  → hit: redirect immediately (no DB query)
-      2. Cache miss         → query DB, populate cache, redirect
-      3. Fire Celery task   → track_click_task.delay() records the Click
-                              asynchronously (write-behind pattern).
-
-    The user receives the redirect before any DB write happens.
-    """
     cache_key = f'url:{short_code}'
     cached = cache.get(cache_key)
 
     if cached is not None:
-        # Fast path — served entirely from Redis
         if cached.get('status') == 'expired':
             raise Http404('URL not found or inactive')
         original_url = cached['original_url']
         url_id = cached['id']
     else:
-        # Slow path — DB lookup, then populate cache
         try:
-            url = URL.objects.get(short_code=short_code)
-        except URL.DoesNotExist:
+            url = get_url_by_code(short_code)
+        except QueryError:
             raise Http404('URL not found')
-
-        if not url.is_active or (url.expires_at and url.expires_at <= timezone.now()):
-            cache.set(cache_key, {'status': 'expired'}, timeout=3600)
-            raise Http404('URL not found or inactive')
 
         original_url = url.original_url
         url_id = url.id
         cache.set(cache_key, {
-            'status': 'active',
-            'original_url': original_url,
-            'id': url_id,
+            'status': 'active', 'original_url': original_url, 'id': url_id,
         }, timeout=CACHE_TTL)
 
-    # --- Write-Behind: fire and forget ---
-    ip_address = _get_client_ip(request)
-    user_agent = request.META.get('HTTP_USER_AGENT', '')
-    referrer = request.META.get('HTTP_REFERER') or None
+    try:
+        track_click_task.delay(
+            url_id=url_id,
+            ip_address=_get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            referrer=request.META.get('HTTP_REFERER') or None,
+        )
+    except Exception:
+        pass  # Never block a redirect
 
-    track_click_task.delay(
-        url_id=url_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
-        referrer=referrer,
-    )
-
-    logger.info(
-        'Redirect served',
-        extra={
-            'short_code': short_code,
-            'cache_hit': cached is not None,
-            'ip': ip_address,
-        },
-    )
     return redirect(original_url)
 
 
@@ -240,51 +304,37 @@ def redirect_view(request, short_code):
 # ---------------------------------------------------------------------------
 
 class HealthCheckView(APIView):
-    """
-    GET /health/
-
-    Probes the two critical external dependencies:
-      - Database: runs a lightweight SELECT 1
-      - Redis (cache): sets and reads a test key
-
-    Returns 200 if both are healthy, 503 if either is down.
-    Used by load balancers and monitoring tools (Prometheus, uptime checks).
-    """
-
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        result = {
-            'status': 'ok',
-            'db': 'ok',
-            'redis': 'ok',
-        }
+        result = {'status': 'ok', 'db': 'ok', 'redis': 'ok', 'preview_circuit': 'ok'}
 
-        # --- Database probe ---
         try:
             with connection.cursor() as cursor:
                 cursor.execute('SELECT 1')
         except Exception as exc:
-            logger.error('Health check: DB unreachable', extra={'error': str(exc)})
+            logger.error('Health: DB unreachable', extra={'error': str(exc)})
             result['db'] = 'error'
             result['status'] = 'error'
 
-        # --- Redis probe ---
         try:
             cache.set('_health_probe', '1', timeout=5)
             if cache.get('_health_probe') != '1':
-                raise RuntimeError('Cache set/get mismatch')
+                raise RuntimeError('Cache mismatch')
         except Exception as exc:
-            logger.error('Health check: Redis unreachable', extra={'error': str(exc)})
+            logger.error('Health: Redis unreachable', extra={'error': str(exc)})
             result['redis'] = 'error'
             result['status'] = 'error'
 
-        http_status = status.HTTP_200_OK if result['status'] == 'ok' else status.HTTP_503_SERVICE_UNAVAILABLE
+        cb = CircuitBreaker('preview_service')
+        cb_status = cb.get_status()
+        if cb_status['state'] == 'open':
+            result['preview_circuit'] = 'open'
+
+        http_status = 200 if result['status'] == 'ok' else 503
         return Response(result, status=http_status)
 
 
 def _get_client_ip(request):
     forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
-    return request.META.get('REMOTE_ADDR')
+    return forwarded.split(',')[0].strip() if forwarded else request.META.get('REMOTE_ADDR')

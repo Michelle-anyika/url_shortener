@@ -2,20 +2,20 @@
 Django==5.0.14
 djangorestframework==3.17.1
 
-# JWT Authentication
+# JWT
 djangorestframework-simplejwt==5.5.1
 PyJWT==2.12.1
 
-# API Documentation
+# API docs
 drf-spectacular==0.29.0
 
-# Environment config
+# Config
 python-decouple==3.8
 
 # Database
 psycopg2-binary==2.9.12
 
-# Password hashing (Argon2)
+# Password hashing
 argon2-cffi==23.1.0
 
 # Async task queue
@@ -26,8 +26,12 @@ django-redis==5.4.0
 # Structured JSON logging
 python-json-logger==2.0.7
 
-# HTTP client (Google social auth token verification)
+# HTTP clients (preview service calls, social auth)
+httpx==0.27.0
 requests==2.32.3
+
+# CORS
+django-cors-headers==4.3.1
 
 # Production server
 gunicorn==22.0.0

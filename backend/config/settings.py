@@ -309,3 +309,35 @@ USE_I18N = True
 USE_TZ = True
 STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# --------------------------------------------------------------------------
+# Preview Microservice — Service Discovery
+# --------------------------------------------------------------------------
+# In Docker Compose, services discover each other by container name.
+# Override PREVIEW_SERVICE_URL in .env for different environments.
+# --------------------------------------------------------------------------
+
+PREVIEW_SERVICE_URL = config('PREVIEW_SERVICE_URL', default='http://preview_service:8001')
+PREVIEW_SERVICE_TIMEOUT = int(config('PREVIEW_SERVICE_TIMEOUT', default='10'))
+
+# --------------------------------------------------------------------------
+# CORS — Frontend Integration (React/Next.js)
+# --------------------------------------------------------------------------
+# Allow the frontend origin to call the API.
+# In production, replace '*' with your actual frontend domain.
+# --------------------------------------------------------------------------
+
+INSTALLED_APPS += ['corsheaders']  # requires: pip install django-cors-headers
+MIDDLEWARE.insert(1, 'corsheaders.middleware.CorsMiddleware')
+
+CORS_ALLOWED_ORIGINS = config(
+    'CORS_ALLOWED_ORIGINS',
+    default='http://localhost:3000,http://127.0.0.1:3000',
+).split(',')
+
+CORS_ALLOW_METHODS = ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT']
+CORS_ALLOW_HEADERS = [
+    'accept', 'accept-encoding', 'authorization',
+    'content-type', 'origin', 'user-agent', 'x-request-id',
+]
+CORS_ALLOW_CREDENTIALS = True
