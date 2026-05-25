@@ -1,77 +1,197 @@
-# Enterprise-Grade URL Shortener - Module 5
+# URL Shortener Microservice
 
-This repository contains a production-ready, highly scalable microservice for shortening URLs. The current branch focuses on **Module 5: Fundamentals, Architecture & Containerization**, establishing a solid architectural foundation, a clean dependency-injected design, and containerization.
-
----
-
-## 1. Architecture & Design Patterns
-
-To meet enterprise requirements, this project decouples business logic, API presentation, and database persistence using the following design principles:
-
-### A. Dependency Injection (DI)
-The application views depend on an abstract service interface rather than concrete model queries.
-* **Interface**: `BaseURLService` in `shortener/services.py` defines the business contract.
-* **Implementation**: `URLService` in `shortener/services.py` implements the DB actions and unique key generation.
-* **Injection**: Dependencies are injected into the Django Class-Based Views (`URLCreateView`, `URLRedirectView`) using the `as_view()` initialization property in `urls.py`. This ensures full testability and mockability of views.
-
-### B. Factory Pattern
-We isolate object creation logic into a dedicated Factory layer to ensure flexibility:
-* **`ShortCodeGeneratorFactory`**: Standardizes how unique short keys are generated, allowing easy transition to alternate hash/random algorithms.
-* **`URLServiceFactory`**: Orchestrates instantiating the service layer and injecting the default generator function.
+An enterprise-grade URL shortener built with Django and Django REST Framework.
 
 ---
 
-## 2. API Endpoint Specifications
+## Module 6 — ORM & Data Access Layer
 
-The microservice exposes a RESTful API with automated OpenAPI specifications:
-
-| Method | Endpoint | Description | Status Codes |
-| :--- | :--- | :--- | :--- |
-| **POST** | `/api/urls/` | Create a shortened URL from a long URL. | `201 Created`, `400 Bad Request` |
-| **GET** | `/<short_code>/` | Redirection endpoint to redirect client to target URL. | `302 Found`, `404 Not Found` |
-
-### Swagger / OpenAPI UI
-Interactive documentation is available at:
-* **Swagger UI**: `/api/docs/`
-* **Raw Schema**: `/api/schema/`
+This module expands the data model to support user ownership, tagging, and deep analytics. The implementation focuses on fetching data efficiently without putting strain on the database.
 
 ---
 
-## 3. DevOps & Containerization
+## Data Schema
 
-### A. Multi-Stage Dockerfile
-To maximize security and reduce image footprint, the `backend/Dockerfile` is structured as a two-stage build:
-1. **Builder Stage**: Installs compiler tools (`gcc`, `libpq-dev`), builds dependencies, and packages them into Python wheels.
-2. **Runner Stage**: Installs the runtime library `libpq5`, extracts compiled wheels, registers a non-root system user (`app`), and executes the Django runtime securely.
+```
+User (core.User — extends AbstractUser)
+├── is_premium  BooleanField  — quick flag for premium feature gates
+└── tier        CharField     — 'free' | 'pro' | 'enterprise'
 
-### B. Startup Synchronization (`wait_for_db.py`)
-To prevent container startup race conditions (where Django attempts to connect before PostgreSQL has fully booted up), we created a custom, platform-independent synchronization script. It continuously checks for a successful PostgreSQL port response before allowing the Django migration runner to run.
+Tag (shortener.Tag)
+└── name        CharField(50, unique)
 
----
+URL (shortener.URL)
+├── original_url   URLField
+├── short_code     CharField(10, unique)  ← db_index=True (fast lookups)
+├── custom_alias   CharField(50, unique, nullable)
+├── owner          ForeignKey → User      (who created this link)
+├── is_active      BooleanField
+├── expires_at     DateTimeField (nullable)
+├── click_count    PositiveIntegerField   (denormalised counter)
+├── title          CharField (nullable)
+├── description    CharField (nullable)
+├── favicon        CharField (nullable)
+├── tags           ManyToManyField → Tag  (categorisation)
+├── created_at     DateTimeField          ← db_index=True (time-range queries)
+└── updated_at     DateTimeField
 
-## 4. How to Run the Project
-
-### Environment Variables
-First, copy the environment variable template:
-```bash
-cp .env.example .env
+Click (shortener.Click)
+├── url         ForeignKey → URL  (every visit is logged)
+├── clicked_at  DateTimeField     ← db_index=True
+├── ip_address  GenericIPAddressField
+├── city        CharField
+├── country     CharField
+├── user_agent  TextField
+└── referrer    URLField
 ```
 
-### Docker Compose
-Run the entire service stack with:
-```bash
-docker-compose up --build
-```
-This command will:
-1. Initialize the PostgreSQL 15 database service.
-2. Build the Django web runtime container.
-3. Automatically wait for PostgreSQL to be ready.
-4. Run Django migrations.
-5. Launch the Gunicorn/Django server at `http://localhost:8000/`.
+### Relationships
+- `URL → User`: many-to-one (many URLs can belong to one user)
+- `URL ↔ Tag`: many-to-many (a URL can have multiple tags; a tag can apply to many URLs)
+- `Click → URL`: many-to-one (every click is tied to one URL)
 
-### Run Tests Locally
-To run the automated suite locally:
+---
+
+## Migrations
+
+| Migration | Description |
+|---|---|
+| `core/0004_user_premium_tier` | Adds `is_premium` and `tier` fields to the User model |
+| `shortener/0002_module6_schema` | Creates Tag, Click; expands URL with all Module 6 fields |
+| `shortener/0003_seed_default_tags` | **Data migration** — seeds 8 default tags (Marketing, Social, Blog, Campaign, Product, Support, Internal, News) |
+
+Run migrations:
 ```bash
-cd backend
-venv\Scripts\python -m pytest
+python manage.py migrate
+```
+
+---
+
+## Custom Managers & QuerySets
+
+### `URLManager`
+
+All methods return **optimized querysets** — `select_related('owner')` and `prefetch_related('tags')` are applied automatically to prevent N+1 queries.
+
+| Method | Description |
+|---|---|
+| `URL.objects.active_urls()` | Non-expired, active URLs only |
+| `URL.objects.expired_urls()` | Deactivated or past-expiry URLs |
+| `URL.objects.popular_urls()` | Ordered by `click_count` descending |
+| `URL.objects.with_click_stats()` | Annotates each URL with `total_clicks_recorded` (DB aggregation via `annotate`) |
+
+### `ClickManager`
+
+| Method | Description |
+|---|---|
+| `Click.objects.clicks_per_country(url_id)` | Returns `{'country': ..., 'total': ...}` dicts ordered by count — all computed in the database using `values().annotate(Count)`, never in Python |
+
+---
+
+## Query Optimisation
+
+### N+1 Prevention
+Every queryset that touches `owner` or `tags` uses:
+```python
+.select_related('owner')      # single JOIN for the FK — no extra queries per URL
+.prefetch_related('tags')     # single IN query for M2M — no extra queries per URL
+```
+Without this, fetching 100 URLs would fire 201 queries (1 + 100 owners + 100 tag sets).
+With it, it fires exactly 2.
+
+### Database Indexes
+```python
+short_code = CharField(db_index=True)   # every redirect is a lookup on this
+created_at = DateTimeField(db_index=True)  # time-range dashboard queries
+```
+
+### DB-Level Aggregation
+Click stats are computed with `annotate()` and `values()` — the database does the grouping and counting, not a Python loop:
+```python
+Click.objects.filter(url_id=url_id)
+    .values('country')
+    .annotate(total=Count('id'))
+    .order_by('-total')
+```
+
+---
+
+## Caching Strategy
+
+**Backend:** Redis in production (`REDIS_URL` env var); `LocMemCache` in development (no setup needed).
+
+**What is cached:** URL objects, keyed as `url:<short_code>`, with a 15-minute TTL.
+
+**Cache lifecycle:**
+1. `GET /r/<short_code>/` — checks `cache.get('url:<short_code>')` first. On a miss it queries the DB and calls `cache.set(...)`.
+2. `POST /deactivate/<short_code>/` — calls `cache.delete('url:<short_code>')` inside the same `transaction.atomic()` block so the cache is never out of sync with the DB.
+3. `POST /shorten/` — calls `cache.delete(...)` after creation to invalidate any stale entry.
+
+**Why Redis?** Redis is an in-memory store with sub-millisecond latency. For a URL shortener, every redirect benefits from avoiding a DB round-trip. At 10,000 redirects/minute, caching cuts database load by ~95% for hot URLs.
+
+---
+
+## Multi-Database Routing
+
+**File:** `config/routers.py` — `AnalyticsReplicaRouter`
+
+The router implements Django's database-routing interface to separate high-volume analytics reads from transactional writes.
+
+| Operation | Database |
+|---|---|
+| All writes | `default` (primary) |
+| `Click` model reads | `analytics_replica` |
+| All other reads | `default` |
+| Migrations | `default` only |
+
+**Configuration:**
+```env
+# .env
+DATABASE_URL=postgres://user:pass@primary-host:5432/urlshortener
+ANALYTICS_REPLICA_URL=postgres://user:pass@replica-host:5432/urlshortener
+```
+
+If `ANALYTICS_REPLICA_URL` is not set, the router mirrors `default` transparently — no code changes needed between development and production.
+
+**Why a separate replica?**
+The `Click` table grows unboundedly (one row per visit). At scale this table will be orders of magnitude larger than all others combined. Routing its reads to a replica keeps the primary database free for low-latency writes (URL creation, click logging) while long-running analytics queries run on the replica without causing lock contention.
+
+---
+
+## Atomic Transactions
+
+All view operations that touch multiple tables are wrapped in `transaction.atomic()`:
+
+- `ShortenURLView.post` — URL creation + tag assignment in one transaction. If tag assignment fails, the URL record is rolled back.
+- `RedirectView.get` — Click logging + `click_count` increment in a nested atomic block. If analytics logging fails, the redirect still completes.
+- `DeactivateURLView.post` — DB update + cache eviction in one atomic block. The cache is never evicted for a deactivation that was rolled back.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `SECRET_KEY` | insecure dev key | Django secret key |
+| `DEBUG` | `True` | Debug mode |
+| `DATABASE_URL` | SQLite | Primary DB connection string |
+| `ANALYTICS_REPLICA_URL` | mirrors default | Analytics read-replica connection string |
+| `REDIS_URL` | LocMemCache | Redis connection string for caching |
+
+---
+
+## Running the Project
+
+```bash
+# Install dependencies
+pip install -r backend/requirements.txt
+
+# Apply migrations (includes seeding default tags)
+python backend/manage.py migrate
+
+# Run the development server
+python backend/manage.py runserver
+
+# Run tests
+python backend/manage.py test shortener
 ```

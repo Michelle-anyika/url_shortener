@@ -17,19 +17,18 @@ from decouple import config
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
+# --------------------------------------------------------------------------
+# Security
+# --------------------------------------------------------------------------
 
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-dev-key')
-
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*').split(',')
 
-ALLOWED_HOSTS = []
 
-
-# Application definition
+# --------------------------------------------------------------------------
+# Applications
+# --------------------------------------------------------------------------
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -38,10 +37,10 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    # Third-party apps
+    # Third-party
     'rest_framework',
     'drf_spectacular',
-    # Local apps
+    # Local
     'core',
     'shortener',
     'api',
@@ -78,8 +77,12 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/5.0/ref/settings/#databases
+# --------------------------------------------------------------------------
+# Databases
+# --------------------------------------------------------------------------
+# Primary (read-write) database.
+# Set DATABASE_URL in .env to use PostgreSQL in production.
+# --------------------------------------------------------------------------
 
 DATABASES = {
     'default': {
@@ -88,62 +91,109 @@ DATABASES = {
     }
 }
 
-db_url = config('DATABASE_URL', default='')
-if db_url:
-    from urllib.parse import urlparse
-    url = urlparse(db_url)
+_db_url = config('DATABASE_URL', default='')
+if _db_url:
+    from urllib.parse import urlparse as _urlparse
+    _u = _urlparse(_db_url)
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': url.path[1:],
-        'USER': url.username,
-        'PASSWORD': url.password,
-        'HOST': url.hostname,
-        'PORT': url.port,
+        'NAME': _u.path[1:],
+        'USER': _u.username,
+        'PASSWORD': _u.password,
+        'HOST': _u.hostname,
+        'PORT': _u.port,
+    }
+
+# --------------------------------------------------------------------------
+# Analytics read replica (optional)
+# --------------------------------------------------------------------------
+# Set ANALYTICS_REPLICA_URL in .env to route Click reads to a separate DB.
+# If not set, falls back to 'default' transparently.
+# --------------------------------------------------------------------------
+
+_replica_url = config('ANALYTICS_REPLICA_URL', default='')
+if _replica_url:
+    from urllib.parse import urlparse as _urlparse
+    _r = _urlparse(_replica_url)
+    DATABASES['analytics_replica'] = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': _r.path[1:],
+        'USER': _r.username,
+        'PASSWORD': _r.password,
+        'HOST': _r.hostname,
+        'PORT': _r.port,
+        'TEST': {'MIRROR': 'default'},  # mirrors default in tests
+    }
+else:
+    # Mirror default so the router still works without a real replica
+    DATABASES['analytics_replica'] = DATABASES['default'].copy()
+    DATABASES['analytics_replica']['TEST'] = {'MIRROR': 'default'}
+
+# Register the router
+DATABASE_ROUTERS = ['config.routers.AnalyticsReplicaRouter']
+
+
+# --------------------------------------------------------------------------
+# Caching
+# --------------------------------------------------------------------------
+# Use Redis in production (set REDIS_URL in .env).
+# Falls back to LocMemCache in development so no external dependency needed.
+# --------------------------------------------------------------------------
+
+_redis_url = config('REDIS_URL', default='')
+
+if _redis_url:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _redis_url,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            },
+            'KEY_PREFIX': 'urlshortener',
+            'TIMEOUT': 60 * 15,  # 15 minutes default TTL
+        }
+    }
+else:
+    # Development fallback — no Redis required
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'urlshortener-dev',
+        }
     }
 
 
-# Password validation
-# https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
+# --------------------------------------------------------------------------
+# Authentication
+# --------------------------------------------------------------------------
+
+AUTH_USER_MODEL = 'core.User'
 
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
 
-# Internationalization
-# https://docs.djangoproject.com/en/5.0/topics/i18n/
+# --------------------------------------------------------------------------
+# Internationalisation
+# --------------------------------------------------------------------------
 
 LANGUAGE_CODE = 'en-us'
-
 TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
 USE_TZ = True
 
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.0/howto/static-files/
-
 STATIC_URL = 'static/'
-
-# Default primary key field type
-# https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-AUTH_USER_MODEL = 'core.User'
+
+# --------------------------------------------------------------------------
+# Django REST Framework & Spectacular
+# --------------------------------------------------------------------------
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
