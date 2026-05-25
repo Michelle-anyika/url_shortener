@@ -23,6 +23,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework.pagination import PageNumberPagination
+from drf_spectacular.utils import extend_schema, OpenApiParameter
+from drf_spectacular.types import OpenApiTypes
 
 from api.serializers import (
     UserRegistrationSerializer, UserProfileSerializer,
@@ -68,11 +70,8 @@ class UserRegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        refresh = RefreshToken.for_user(user)
         return Response({
             'user': UserProfileSerializer(user).data,
-            'access': str(refresh.access_token),
-            'refresh': str(refresh),
         }, status=status.HTTP_201_CREATED)
 
 
@@ -134,14 +133,9 @@ class SocialAuthView(APIView):
 # ---------------------------------------------------------------------------
 
 class URLCreateView(APIView):
-    """
-    POST /api/v1/urls/
-    Executes the URLCreationSaga:
-      Step 1 — CreateURLCommand (local DB write)
-      Step 2 — fetch_url_preview_task.delay() (async external call)
-    """
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(request=URLSerializer, responses=URLSerializer)
     def post(self, request):
         serializer = URLSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
@@ -152,10 +146,6 @@ class URLCreateView(APIView):
             owner=request.user,
             custom_alias=data.get('custom_alias') or None,
             expires_at=data.get('expires_at'),
-            title=data.get('title'),
-            description=data.get('description'),
-            favicon=data.get('favicon'),
-            tag_names=[t.name for t in data.get('tags', [])],
         )
 
         try:
@@ -174,12 +164,15 @@ class URLCreateView(APIView):
 
 
 class URLListView(APIView):
-    """
-    GET /api/v1/urls/?tag=<name>&search=<term>&page=<n>
-    Returns the authenticated user's URLs. Supports pagination and filtering.
-    """
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        responses=URLSerializer(many=True),
+        parameters=[
+            OpenApiParameter('tag', OpenApiTypes.STR, description='Filter by tag name'),
+            OpenApiParameter('search', OpenApiTypes.STR, description='Search by title or URL'),
+        ],
+    )
     def get(self, request):
         tag = request.query_params.get('tag')
         search = request.query_params.get('search')
@@ -192,18 +185,12 @@ class URLListView(APIView):
 
 
 class URLDetailView(APIView):
-    """
-    GET    /api/v1/urls/<short_code>/ — public read
-    PUT    /api/v1/urls/<short_code>/ — owner only (full update)
-    PATCH  /api/v1/urls/<short_code>/ — owner only (partial update)
-    DELETE /api/v1/urls/<short_code>/ — owner only
-    """
-
     def get_permissions(self):
         if self.request.method == 'GET':
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated(), IsOwnerOrReadOnly()]
 
+    @extend_schema(responses=URLSerializer)
     def get(self, request, short_code):
         try:
             url = get_url_by_code(short_code)
@@ -211,9 +198,11 @@ class URLDetailView(APIView):
             return Response({'error': 'Not found'}, status=404)
         return Response(URLSerializer(url).data)
 
+    @extend_schema(request=URLSerializer, responses=URLSerializer)
     def patch(self, request, short_code):
         return self._update(request, short_code)
 
+    @extend_schema(request=URLSerializer, responses=URLSerializer)
     def put(self, request, short_code):
         return self._update(request, short_code)
 
@@ -223,9 +212,6 @@ class URLDetailView(APIView):
             requester=request.user,
             original_url=request.data.get('original_url'),
             expires_at=request.data.get('expires_at'),
-            is_active=request.data.get('is_active'),
-            title=request.data.get('title'),
-            description=request.data.get('description'),
         )
         try:
             url = handle_update_url(cmd)

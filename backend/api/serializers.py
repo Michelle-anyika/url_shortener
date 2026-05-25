@@ -19,15 +19,22 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     """
     Handles new user registration.
     - Password is write-only and validated against Django's password validators.
-    - Email is required and must be unique.
+    - Email is required, unique, and normalized to lowercase.
     """
 
     password = serializers.CharField(write_only=True, min_length=8)
+    email = serializers.EmailField(required=True)
 
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'password']
         read_only_fields = ['id']
+
+    def validate_email(self, value):
+        normalized = value.lower().strip()
+        if User.objects.filter(email__iexact=normalized).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return normalized
 
     def validate_password(self, value):
         try:
@@ -73,7 +80,7 @@ class URLSerializer(serializers.ModelSerializer):
             'is_active', 'expires_at', 'click_count',
             'tags', 'owner_username', 'created_at',
         ]
-        read_only_fields = ['id', 'short_code', 'click_count', 'owner_username', 'created_at']
+        read_only_fields = ['id', 'is_active', 'tags', 'short_code', 'click_count', 'owner_username', 'title', 'description', 'favicon', 'created_at']
 
     def validate(self, data):
         request = self.context.get('request')

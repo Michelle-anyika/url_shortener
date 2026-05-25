@@ -52,8 +52,8 @@ services:
   # --------------------------------------------------------------------------
   web:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     command: gunicorn -c gunicorn.conf.py config.wsgi:application
     ports:
       - "8000:8000"
@@ -74,8 +74,8 @@ services:
 
   celery_worker:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     command: celery -A config worker -l info --concurrency 4
     env_file: backend/.env
     environment:
@@ -91,8 +91,8 @@ services:
 
   celery_beat:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
     command: celery -A config beat -l info
     env_file: backend/.env
     environment:
