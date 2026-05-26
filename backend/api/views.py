@@ -23,8 +23,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework.pagination import PageNumberPagination
-from drf_spectacular.utils import extend_schema, OpenApiParameter
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse, inline_serializer
 from drf_spectacular.types import OpenApiTypes
+from rest_framework import fields as drf_fields
 
 from api.serializers import (
     UserRegistrationSerializer, UserProfileSerializer,
@@ -82,6 +83,13 @@ class ThrottledTokenObtainPairView(TokenObtainPairView):
 class LogoutView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        request=inline_serializer('LogoutRequest', fields={'refresh': drf_fields.CharField()}),
+        responses={200: OpenApiResponse(description='Successfully logged out.'),
+                   400: OpenApiResponse(description='Missing or invalid refresh token.')},
+        summary='Logout',
+        description='Blacklists the provided refresh token, invalidating the session.',
+    )
     def post(self, request):
         refresh_token = request.data.get('refresh')
         if not refresh_token:
@@ -97,6 +105,15 @@ class SocialAuthView(APIView):
     permission_classes = [permissions.AllowAny]
     GOOGLE_TOKENINFO_URL = 'https://oauth2.googleapis.com/tokeninfo'
 
+    @extend_schema(
+        request=SocialAuthSerializer,
+        responses={200: UserProfileSerializer,
+                   401: OpenApiResponse(description='Invalid or unverifiable token.'),
+                   400: OpenApiResponse(description='Unsupported provider.')},
+        summary='Social Login (Google)',
+        description='Verify a Google ID token and return a JWT access + refresh pair. '
+                    'Send provider="google" and the ID token obtained from Google OAuth.',
+    )
     def post(self, request):
         serializer = SocialAuthSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -220,6 +237,11 @@ class URLDetailView(APIView):
             return Response({'error': e.message}, status=code)
         return Response(URLSerializer(url).data)
 
+    @extend_schema(
+        responses={204: OpenApiResponse(description='URL deleted successfully.'),
+                   404: OpenApiResponse(description='URL not found or not owned by you.')},
+        summary='Delete URL',
+    )
     def delete(self, request, short_code):
         cmd = DeleteURLCommand(short_code=short_code, requester=request.user)
         try:
@@ -230,12 +252,16 @@ class URLDetailView(APIView):
 
 
 class URLAnalyticsView(APIView):
-    """
-    GET /api/v1/analytics/<short_code>/
-    Premium + owner only. Returns time-series click data and geo breakdown.
-    """
     permission_classes = [permissions.IsAuthenticated, IsPremiumUser]
 
+    @extend_schema(
+        responses={200: URLAnalyticsSerializer,
+                   403: OpenApiResponse(description='Premium account required.'),
+                   404: OpenApiResponse(description='URL not found or not owned by you.')},
+        summary='URL Analytics (Premium)',
+        description='Returns click count and geographic breakdown for a URL. '
+                    'Requires a Premium or Admin account and ownership of the URL.',
+    )
     def get(self, request, short_code):
         try:
             url = get_url_analytics(short_code=short_code, owner=request.user)
@@ -292,6 +318,13 @@ def redirect_view(request, short_code):
 class HealthCheckView(APIView):
     permission_classes = [permissions.AllowAny]
 
+    @extend_schema(
+        responses={200: OpenApiResponse(description='All systems healthy.'),
+                   503: OpenApiResponse(description='One or more services are down.')},
+        summary='Health Check',
+        description='Probes the database, Redis cache, and preview service circuit breaker. '
+                    'Returns 200 if all healthy, 503 if any are degraded.',
+    )
     def get(self, request):
         result = {'status': 'ok', 'db': 'ok', 'redis': 'ok', 'preview_circuit': 'ok'}
 

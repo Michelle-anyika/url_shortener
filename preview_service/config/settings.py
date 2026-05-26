@@ -10,7 +10,7 @@ import os
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('SECRET_KEY', 'preview-service-dev-key-not-for-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'preview_service,localhost,127.0.0.1').split(',')
 
 INSTALLED_APPS = [
     'django.contrib.contenttypes',

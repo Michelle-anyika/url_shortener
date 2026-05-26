@@ -82,6 +82,20 @@ class URLSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'is_active', 'tags', 'short_code', 'click_count', 'owner_username', 'title', 'description', 'favicon', 'created_at']
 
+    def validate_custom_alias(self, value):
+        if not value:
+            return value
+        value = value.strip()
+        if len(value) < 3:
+            raise serializers.ValidationError("Custom alias must be at least 3 characters.")
+        if len(value) > 10:
+            raise serializers.ValidationError("Custom alias must be 10 characters or fewer.")
+        if not all(c.isalnum() or c in '-_' for c in value):
+            raise serializers.ValidationError(
+                "Custom alias may only contain letters, numbers, hyphens, and underscores."
+            )
+        return value
+
     def validate(self, data):
         request = self.context.get('request')
         user = getattr(request, 'user', None)

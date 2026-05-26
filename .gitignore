@@ -71,6 +71,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+MODULE_7_GUIDE.md
 
 # PyBuilder
 .pybuilder/

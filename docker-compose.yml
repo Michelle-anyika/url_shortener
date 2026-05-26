@@ -29,9 +29,9 @@ services:
 
   # --------------------------------------------------------------------------
   # Preview Microservice — stateless, runs on port 8001
-  # Discovered by the main service via Docker Compose DNS: preview_service
+  # Service name uses hyphen (not underscore) — Django rejects underscore hostnames
   # --------------------------------------------------------------------------
-  preview_service:
+  preview:
     build:
       context: ./preview_service
       dockerfile: Dockerfile
@@ -40,6 +40,7 @@ services:
     environment:
       DEBUG: "False"
       SCRAPER_TIMEOUT: "10"
+      ALLOWED_HOSTS: "preview,localhost,127.0.0.1"
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/')"]
@@ -63,13 +64,13 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-      PREVIEW_SERVICE_URL: http://preview_service:8001
+      PREVIEW_SERVICE_URL: http://preview:8001
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-      preview_service:
+      preview:
         condition: service_healthy
 
   celery_worker:
@@ -82,7 +83,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@db:5432/urlshortener
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
-      PREVIEW_SERVICE_URL: http://preview_service:8001
+      PREVIEW_SERVICE_URL: http://preview:8001
     depends_on:
       db:
         condition: service_healthy
